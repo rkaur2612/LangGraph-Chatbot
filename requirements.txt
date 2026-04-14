@@ -1,0 +1,7 @@
+langgraph
+langchain
+langchain-core
+langchain_groq
+dotenv
+streamlit
+langgraph-checkpoint-sqlite
