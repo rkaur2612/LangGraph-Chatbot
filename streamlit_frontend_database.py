@@ -63,13 +63,27 @@ for thread_id in st.session_state['chat_threads'][::-1]:
 
         temp_messages = []
 
+
         for message in messages:
-            if isinstance(message,HumanMessage):
-                role='user'
+            # get content safely
+            content = getattr(message, 'content', None)
+            # skip empty or placeholder messages
+            if content is None or (isinstance(content, str) and content.strip() == ''):
+                continue
+
+            # Keep only user and assistant (AI) messages; ignore tool/system messages
+            if isinstance(message, HumanMessage):
+                role = 'user'
+                text = content
+            elif isinstance(message, AIMessage):
+                role = 'assistant'
+                text = content
             else:
-                role='assistant'
-            temp_messages.append({'role': role, 'content': message.content})
-        
+                # skip tool/system/other messages entirely
+                continue
+
+            temp_messages.append({'role': role, 'content': text})
+
         st.session_state['message_history'] = temp_messages
 
 # ***************************** Main UI ******************************************
@@ -97,19 +111,26 @@ if user_input:
     
     CONFIG = {'configurable' : {'thread_id':st.session_state['thread_id']}}
 
-    # display assistant message
-    with st.chat_message('assistant'):
-        # streaming only AI messages and not tool message
-        def ai_only_stream():
-            for message_chunk, metadata in chatbot.stream(
-                {'messages': [HumanMessage(content=user_input)]},
-                config = CONFIG,
-                stream_mode ='messages'
-            ):
-                if isinstance(message_chunk, AIMessage):
-                    # yield only assistant tokens
-                    yield message_chunk.content
-        
-        ai_message = st.write_stream(ai_only_stream())
+    # display assistant message — stream and capture final text
+    response_chunks = []
 
-    st.session_state['message_history'].append({'role':'assistant','content':ai_message})
+    def stream_and_capture():
+        for message_chunk, metadata in chatbot.stream(
+            {'messages': [HumanMessage(content=user_input)]},
+            config = CONFIG,
+            stream_mode ='messages'
+        ):
+            # only capture AIMessage chunks; ignore tool messages during streaming
+            if not isinstance(message_chunk, AIMessage):
+                continue
+
+            chunk_text = message_chunk.content or ''
+            response_chunks.append(chunk_text)
+            yield chunk_text
+
+    with st.chat_message('assistant'):
+        _ = st.write_stream(stream_and_capture())
+
+    full_ai_text = ''.join(response_chunks).strip()
+    if full_ai_text:
+        st.session_state['message_history'].append({'role':'assistant','content': full_ai_text})
