@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph.message import add_messages
 import sqlite3
+import logging
 
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -19,8 +20,12 @@ import os
 
 load_dotenv()
 
+# configure logger
+logging.basicConfig(level=logging.INFO)
+
 # ---------------- LLM ------------------------------------#
-model = ChatGroq(model="llama-3.1-8b-instant")
+# lower temperature to reduce hallucinations when calling tools
+model = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2)
 
 # ----------------- TOOLS ----------------------------------#
 # search_tool = DuckDuckGoSearchRun(region="us-en")
@@ -78,6 +83,18 @@ tools = [get_stock_price, search_tool, calculator]
 # bind tools to llm
 llm_with_tools = model.bind_tools(tools)
 
+# Clear system prompt describing allowed tools and rules to reduce hallucinated tool calls
+SYSTEM_PROMPT = (
+    "You have access to the following tools (use ONLY these exact names):\n"
+    "- calculator(first_num: float, second_num: float, operation: str) -> returns a JSON with keys first_num, second_num, operation, result.\n"
+    "- search_tool(query: str) -> returns search results.\n"
+    "- get_stock_price(symbol: str) -> returns stock price info.\n"
+    "Rules:\n"
+    "- Only call a tool when it is strictly necessary to compute or retrieve information.\n"
+    "- Do NOT invent or assume any other tool names. If a tool is not available, answer directly.\n"
+    "- When returning tool output to the user, present it in a human-friendly sentence rather than raw JSON.\n"
+)
+
 # ------------- STATE ------------------------#
 class ChatState(TypedDict):
     # append all messages in list of messages, using reducer add_messages
@@ -91,11 +108,28 @@ def chat_node(state:ChatState):
     # takes user query from state
     messages = state['messages']
 
-    # pass to llm
-    response = llm_with_tools.invoke(messages)
+    # Ensure system prompt is present at the start of the conversation to guide tool usage
+    if not messages or not isinstance(messages[0], SystemMessage):
+        messages_to_send = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    else:
+        messages_to_send = messages
+
+    # Try invoking LLM with tools; if tool call validation fails or any tool-related error
+    # occurs, fall back to the base model (no tools) to produce a safe assistant reply.
+    try:
+        response = llm_with_tools.invoke(messages_to_send)
+    except Exception as e:
+        logging.exception("Tool invocation failed, falling back to base model: %s", e)
+        try:
+            fallback_resp = model.invoke(messages_to_send)
+            return {'messages': [fallback_resp]}
+        except Exception:
+            # As a last resort, return a polite assistant message
+            from langchain_core.messages import AIMessage
+            return {'messages': [AIMessage(content="Sorry, I can't run the requested tool right now. Please ask your question without tool usage.")]}    
 
     # add llm message back to state
-    return{'messages' : [response]}
+    return {'messages': [response]}
 
 # tool node
 tool_node = ToolNode(tools) # executes tool call
