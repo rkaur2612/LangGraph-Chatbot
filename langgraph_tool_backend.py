@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 import operator
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import add_messages
 import sqlite3
 import logging
@@ -18,7 +18,17 @@ from langchain_core.tools import tool
 import requests
 import os
 
+from langchain_mcp_adapters.client import MultiServerMCPClient
+import asyncio
+import nest_asyncio
+import aiosqlite
+import json
+
 load_dotenv()
+
+# Use one shared event loop for async MCP tools, checkpoint access, and graph calls.
+ASYNC_LOOP = asyncio.new_event_loop()
+asyncio.set_event_loop(ASYNC_LOOP)
 
 # configure logger
 logging.basicConfig(level=logging.INFO)
@@ -29,56 +39,98 @@ model = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2)
 
 # ----------------- TOOLS ----------------------------------#
 # search_tool = DuckDuckGoSearchRun(region="us-en")
-_search = DuckDuckGoSearchRun(region="us-en")
 
-@tool
-def search_tool(query: str):
-    """
-    Search the internet for current events, news, sports scores (like IPL), or real-time info.
-    Use this tool whenever you need information that is not in your training data.
-    """
-    return _search.run(query)
+# COMMENTED NORMAL TOOL CALLING
+# _search = DuckDuckGoSearchRun(region="us-en")
 
-# calculator tool
-@tool
-def calculator(first_num:float,second_num:float,operation:str) -> dict:
-    """
-    Perform basic arithmetic operations on two numbers
-    Supported operations: add, sub, mul, div
-    """
+# @tool
+# def search_tool(query: str):
+#     """
+#     Search the internet for current events, news, sports scores (like IPL), or real-time info.
+#     Use this tool whenever you need information that is not in your training data.
+#     """
+#     return _search.run(query)
 
-    try:
-        if operation == "add":
-            result = first_num + second_num
-        elif operation == "sub":
-            result = first_num - second_num
-        elif operation == "mul":
-            result = first_num * second_num
-        elif operation == "div":
-            if second_num == 0:
-                return{"error":"Division by zero is not allowed"}
-            result = first_num/second_num
-        else:
-            return {"error": f"Unsupported operation, {operation}"}
+# # calculator tool
+# @tool
+# def calculator(first_num:float,second_num:float,operation:str) -> dict:
+#     """
+#     Perform basic arithmetic operations on two numbers
+#     Supported operations: add, sub, mul, div
+#     """
+
+#     try:
+#         if operation == "add":
+#             result = first_num + second_num
+#         elif operation == "sub":
+#             result = first_num - second_num
+#         elif operation == "mul":
+#             result = first_num * second_num
+#         elif operation == "div":
+#             if second_num == 0:
+#                 return{"error":"Division by zero is not allowed"}
+#             result = first_num/second_num
+#         else:
+#             return {"error": f"Unsupported operation, {operation}"}
         
-        return{"first_num":first_num, "second_num":second_num, "operation":operation, "result":result}
-    except Exception as e:
-        return {"error": str(e)}
+#         return{"first_num":first_num, "second_num":second_num, "operation":operation, "result":result}
+#     except Exception as e:
+#         return {"error": str(e)}
             
-# stock price tool
-@tool
-def get_stock_price(symbol:str) -> dict:
-    """
-    Fetch latest stock price for a given symbol  (e.g. 'AAPL','TSLA')
-    using Alpha Vantage with API key in the URL
-    """
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey=WEYXMRW3JCFZF0QH"
-    r = requests.get(url)
-    return r.json()
+# # stock price tool
+# @tool
+# def get_stock_price(symbol:str) -> dict:
+#     """
+#     Fetch latest stock price for a given symbol  (e.g. 'AAPL','TSLA')
+#     using Alpha Vantage with API key in the URL
+#     """
+#     url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey=WEYXMRW3JCFZF0QH"
+#     r = requests.get(url)
+#     return r.json()
 
 
-# make tool list
-tools = [get_stock_price, search_tool, calculator]
+# # make tool list
+# tools = [get_stock_price, search_tool, calculator]
+
+# bind tools to llm
+# llm_with_tools = model.bind_tools(tools)
+
+# --------------------- MCP CLIENT ---------------------------#
+async def load_mcp_tools():
+    client = MultiServerMCPClient(
+        {
+            "calculator": {
+                "command": "python",
+                "args": ["mcp_servers/calculator_server.py"],
+                "transport": "stdio",
+            },
+            "search": {
+                "command": "python",
+                "args": ["mcp_servers/search_server.py"],
+                "transport": "stdio",
+            },
+            "stock": {
+                "command": "python",
+                "args": ["mcp_servers/stock_server.py"],
+                "transport": "stdio",
+            }
+        }
+    )
+
+    tools = await client.get_tools()
+    return tools
+
+# mcp tool loading
+nest_asyncio.apply()
+
+# tools = asyncio.run(load_mcp_tools())
+tools = ASYNC_LOOP.run_until_complete(load_mcp_tools())
+
+print("Loaded MCP Tools:", [t.name for t in tools])
+
+for tool in tools:
+    print(tool.name)
+    print(json.dumps(tool.args_schema, indent=2))
 
 # bind tools to llm
 llm_with_tools = model.bind_tools(tools)
@@ -87,11 +139,11 @@ llm_with_tools = model.bind_tools(tools)
 SYSTEM_PROMPT = (
     "You have access to the following tools (use ONLY these exact names):\n"
     "- calculator(first_num: float, second_num: float, operation: str) -> returns a JSON with keys first_num, second_num, operation, result.\n"
-    "- search_tool(query: str) -> returns search results.\n"
-    "- get_stock_price(symbol: str) -> returns stock price info.\n"
+    "- search_tool(query: str) -> returns web search results for current or factual information.\n"
+    "- get_stock_price(symbol: str) -> returns the latest stock quote for a ticker symbol.\n"
     "Rules:\n"
     "- Only call a tool when it is strictly necessary to compute or retrieve information.\n"
-    "- Do NOT invent or assume any other tool names. If a tool is not available, answer directly.\n"
+    "- Do NOT invent or assume any other tool names. If calculator, search, or stock lookup is not needed, answer directly.\n"
     "- When returning tool output to the user, present it in a human-friendly sentence rather than raw JSON.\n"
 )
 
@@ -99,7 +151,6 @@ SYSTEM_PROMPT = (
 class ChatState(TypedDict):
     # append all messages in list of messages, using reducer add_messages
     messages: Annotated[list[BaseMessage], add_messages]
-
 
 # ----------- NODES ---------------------------------#
 
@@ -118,6 +169,10 @@ def chat_node(state:ChatState):
     # occurs, fall back to the base model (no tools) to produce a safe assistant reply.
     try:
         response = llm_with_tools.invoke(messages_to_send)
+        if getattr(response, "tool_calls", None):
+            logging.info("LLM requested tool call(s): %s", response.tool_calls)
+        else:
+            logging.info("LLM answered directly without requesting a tool.")
     except Exception as e:
         logging.exception("Tool invocation failed, falling back to base model: %s", e)
         try:
@@ -126,20 +181,23 @@ def chat_node(state:ChatState):
         except Exception:
             # As a last resort, return a polite assistant message
             from langchain_core.messages import AIMessage
-            return {'messages': [AIMessage(content="Sorry, I can't run the requested tool right now. Please ask your question without tool usage.")]}    
+            return {'messages': [AIMessage(content="Sorry, I can't run the requested tool right now. Please ask your question without tool usage.")]}
 
     # add llm message back to state
     return {'messages': [response]}
 
 # tool node
-tool_node = ToolNode(tools) # executes tool call
+#tool_node = ToolNode(tools, handle_tool_errors=True) # executes tool call
+tool_node = ToolNode(tools, handle_tool_errors=True)
 
 # -------------------- CHECKPOINTER --------------------# 
-# database connection
-conn = sqlite3.connect(database='chatbot.db', check_same_thread=False)
+async def create_checkpointer():
+    conn = await aiosqlite.connect(database='chatbot.db')
+    return AsyncSqliteSaver(conn=conn)
+
 
 # checkpointer
-checkpointer = SqliteSaver(conn=conn)
+checkpointer = ASYNC_LOOP.run_until_complete(create_checkpointer())
 
 # --------------------- GRAPH ---------------------------#
 # define graph
@@ -166,19 +224,14 @@ def retrieve_all_threads():
     """Return list of unique threads in database"""
     all_threads = set()
 
-    for checkpoint in checkpointer.list(None):
-        # print(checkpoint.config['configurable']['thread_id'])
-        all_threads.add(checkpoint.config['configurable']['thread_id'])
+    async def collect_threads():
+        async for checkpoint in checkpointer.alist(None):
+            all_threads.add(checkpoint.config['configurable']['thread_id'])
+
+    ASYNC_LOOP.run_until_complete(collect_threads())
 
     return list(all_threads)
 
-#testing only - NOT IN USE
 
-# CONFIG = {'configurable' : {'thread_id':'thread_2'}}
-
-# response = chatbot.invoke(
-#             {'messages': [HumanMessage(content='My name is Sharn')]},
-#             config = CONFIG
-#             )
-
-# print(response)
+def run_async(coro):
+    return ASYNC_LOOP.run_until_complete(coro)
