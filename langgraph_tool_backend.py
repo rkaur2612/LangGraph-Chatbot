@@ -84,8 +84,11 @@ SYSTEM_PROMPT = (
     "- search_tool(query: str) -> returns web search results for current or factual information.\n"
     "- get_stock_price(symbol: str) -> returns the latest stock quote for a ticker symbol.\n"
     "Rules:\n"
-    "- Only call a tool when it is strictly necessary to compute or retrieve information.\n"
-    "- Do NOT invent or assume any other tool names. If calculator, search, or stock lookup is not needed, answer directly.\n"
+    "- Call calculator for arithmetic questions like add, subtract, multiply, or divide.\n"
+    "- Call search_tool for current, real-world, factual, location, travel, news, or recommendation questions.\n"
+    "- Call get_stock_price for any stock, share, ticker, market price, or quote question.\n"
+    "- Do NOT answer those questions directly when a matching tool exists.\n"
+    "- Do NOT invent or assume any other tool names.\n"
     "- When returning tool output to the user, present it in a human-friendly sentence rather than raw JSON.\n"
 )
 
