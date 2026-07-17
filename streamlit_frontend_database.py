@@ -1,7 +1,8 @@
 import streamlit as st
-from langgraph_tool_backend import chatbot, retrieve_all_threads
+from langgraph_tool_backend import chatbot, retrieve_all_threads, run_async
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage, AIMessage
 import uuid
+import asyncio
 
 # *************************** Utilities functions ********************************
 
@@ -24,7 +25,11 @@ def add_threads(thread_id):
 
 # returns message history for a given thread_id
 def load_conv(thread_id):
-    return chatbot.get_state(config={'configurable' : {'thread_id': thread_id}}).values['messages']
+    return run_async(_load_conv_async(thread_id))
+
+
+async def _load_conv_async(thread_id):
+    return (await chatbot.aget_state(config={'configurable': {'thread_id': thread_id}})).values['messages']
 
 
 # **************************** Session Setup *************************************
@@ -111,26 +116,42 @@ if user_input:
     
     CONFIG = {'configurable' : {'thread_id':st.session_state['thread_id']}}
 
-    # display assistant message — stream and capture final text
-    response_chunks = []
+    # display assistant message — run the graph asynchronously so MCP tools use their async path
+    response = run_async(chatbot.ainvoke(
+        {"messages": [HumanMessage(content=user_input)]},
+        config=CONFIG
+    ))
 
-    def stream_and_capture():
-        for message_chunk, metadata in chatbot.stream(
-            {'messages': [HumanMessage(content=user_input)]},
-            config = CONFIG,
-            stream_mode ='messages'
-        ):
-            # only capture AIMessage chunks; ignore tool messages during streaming
-            if not isinstance(message_chunk, AIMessage):
-                continue
+    # extract final assistant message
+    assistant_text = response["messages"][-1].content
 
-            chunk_text = message_chunk.content or ''
-            response_chunks.append(chunk_text)
-            yield chunk_text
+    # display assistant message
+    with st.chat_message("assistant"):
+        st.text(assistant_text)
 
-    with st.chat_message('assistant'):
-        _ = st.write_stream(stream_and_capture())
+    # save to session memory
+    st.session_state["message_history"].append(
+        {"role": "assistant", "content": assistant_text}
+    )
+    # response_chunks = []
 
-    full_ai_text = ''.join(response_chunks).strip()
-    if full_ai_text:
-        st.session_state['message_history'].append({'role':'assistant','content': full_ai_text})
+    # def stream_and_capture():
+    #     for message_chunk, metadata in chatbot.stream(
+    #         {'messages': [HumanMessage(content=user_input)]},
+    #         config = CONFIG,
+    #         stream_mode ='messages'
+    #     ):
+    #         # only capture AIMessage chunks; ignore tool messages during streaming
+    #         if not isinstance(message_chunk, AIMessage):
+    #             continue
+
+    #         chunk_text = message_chunk.content or ''
+    #         response_chunks.append(chunk_text)
+    #         yield chunk_text
+
+    # with st.chat_message('assistant'):
+    #     _ = st.write_stream(stream_and_capture())
+
+    # full_ai_text = ''.join(response_chunks).strip()
+    # if full_ai_text:
+    #     st.session_state['message_history'].append({'role':'assistant','content': full_ai_text})

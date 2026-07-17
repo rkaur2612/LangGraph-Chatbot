@@ -7,3 +7,11 @@ streamlit
 langgraph-checkpoint-sqlite
 langchain-community
 ddgs
+pypdf
+faiss-cpu
+sentence-transformers
+torchvision
+mcp #used to create mcp server
+langchain-mcp-adapters #connect langraph/langchain to mcp servers
+nest_asyncio
+aiosqlite
